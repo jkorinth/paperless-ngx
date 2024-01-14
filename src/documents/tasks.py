@@ -22,6 +22,7 @@ from documents.classifier import DocumentClassifier
 from documents.classifier import load_classifier
 from documents.consumer import Consumer
 from documents.consumer import ConsumerError
+from documents.consumer import DirectorySetupPlugin
 from documents.consumer import DuplicateAsnCheckerPlugin
 from documents.consumer import DuplicateFileCheckerPlugin
 from documents.consumer import WorkflowTriggerPlugin
@@ -113,6 +114,7 @@ def consume_file(
         overrides = DocumentMetadataOverrides()
 
     plugins: list[type[ConsumeTaskPlugin]] = [
+        DirectorySetupPlugin,
         CollatePlugin,
         BarcodePlugin,
         WorkflowTriggerPlugin,

@@ -1,5 +1,4 @@
 import datetime as dt
-import logging
 import os
 import shutil
 from pathlib import Path
@@ -15,8 +14,7 @@ from documents.plugins.base import ConsumeTaskPlugin
 from documents.plugins.base import NoCleanupPluginMixin
 from documents.plugins.base import NoSetupPluginMixin
 from documents.plugins.base import StopConsumeTaskError
-
-logger = logging.getLogger("paperless.double_sided")
+from documents.plugins.helpers import ProgressStatusOptions
 
 # Hardcoded for now, could be made a configurable setting if needed
 TIMEOUT_MINUTES: Final[int] = 30
@@ -55,7 +53,12 @@ class CollatePlugin(NoCleanupPluginMixin, NoSetupPluginMixin, ConsumeTaskPlugin)
         Returns a status message on success, or raises a ConsumerError
         in case of failure.
         """
-
+        self.status_mgr.send_progress(
+            ProgressStatusOptions.WORKING,
+            "Checking for collation",
+            1,
+            100,
+        )
         if self.input_doc.mime_type == "application/pdf":
             pdf_file = self.input_doc.original_file
         elif (
@@ -80,7 +83,9 @@ class CollatePlugin(NoCleanupPluginMixin, NoSetupPluginMixin, ConsumeTaskPlugin)
             # if the file is older than the timeout, we don't consider
             # it valid
             if (dt.datetime.now().timestamp() - stats.st_mtime) > TIMEOUT_SECONDS:
-                logger.warning("Outdated double sided staging file exists, deleting it")
+                self.log.warning(
+                    "Outdated double sided staging file exists, deleting it",
+                )
                 staging.unlink()
             else:
                 valid_staging_exists = True
@@ -118,7 +123,13 @@ class CollatePlugin(NoCleanupPluginMixin, NoSetupPluginMixin, ConsumeTaskPlugin)
                     # If the user didn't create the subdirs yet, do it for them
                     new_file.parent.mkdir(parents=True, exist_ok=True)
                     pdf1.save(new_file)
-                logger.info("Collated documents into new file %s", new_file)
+                self.log.info("Collated documents into new file %s", new_file)
+                self.status_mgr.send_progress(
+                    ProgressStatusOptions.SUCCESS,
+                    "Finished collation staging",
+                    100,
+                    100,
+                )
                 raise StopConsumeTaskError(
                     "Success. Even numbered pages of double sided scan collated "
                     "with odd pages",
@@ -137,9 +148,15 @@ class CollatePlugin(NoCleanupPluginMixin, NoSetupPluginMixin, ConsumeTaskPlugin)
             # is outdated when another file gets uploaded
             timestamp = dt.datetime.now().timestamp()
             os.utime(staging, (timestamp, timestamp))
-            logger.info(
+            self.log.info(
                 "Got scan with odd numbered pages of double-sided scan, moved it to %s",
                 staging,
+            )
+            self.status_mgr.send_progress(
+                ProgressStatusOptions.SUCCESS,
+                "Finished collation staging",
+                100,
+                100,
             )
             raise StopConsumeTaskError(
                 "Received odd numbered pages of double sided scan, waiting up to "

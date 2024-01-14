@@ -73,6 +73,12 @@ class BarcodePlugin(ConsumeTaskPlugin):
         self.pdf_file = self.input_doc.original_file
         self._tiff_conversion_done = False
         self.barcodes: list[Barcode] = []
+        self.status_mgr.send_progress(
+            ProgressStatusOptions.WORKING,
+            "Checking for barcodes",
+            2,
+            100,
+        )
 
     def run(self) -> Optional[str]:
         # Maybe do the conversion of TIFF to PDF
@@ -89,6 +95,12 @@ class BarcodePlugin(ConsumeTaskPlugin):
 
         separator_pages = self.get_separation_pages()
         if not separator_pages:
+            self.status_mgr.send_progress(
+                ProgressStatusOptions.WORKING,
+                "Finished barcodes",
+                3,
+                100,
+            )
             return "No pages to split on!"
 
         # We have pages to split against

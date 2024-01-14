@@ -2,16 +2,12 @@ import datetime
 import hashlib
 import os
 import tempfile
-import uuid
 from enum import Enum
 from pathlib import Path
 from subprocess import CompletedProcess
 from subprocess import run
 from typing import Optional
 
-import magic
-from asgiref.sync import async_to_sync
-from channels.layers import get_channel_layer
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import transaction
@@ -24,7 +20,6 @@ from documents.classifier import load_classifier
 from documents.data_models import DocumentMetadataOverrides
 from documents.file_handling import create_source_path_directory
 from documents.file_handling import generate_unique_filename
-from documents.loggers import LoggingMixin
 from documents.matching import document_matches_workflow
 from documents.models import Correspondent
 from documents.models import CustomField
@@ -179,6 +174,13 @@ class DuplicateFileCheckerPlugin(
                 extra_args={"document_id": existing_doc.pk},
             )
             raise StopConsumeTaskError(msg)
+        else:
+            self.status_mgr.send_progress(
+                ProgressStatusOptions.WORKING,
+                "Duplicate file checking",
+                4,
+                100,
+            )
 
 
 class DuplicateAsnCheckerPlugin(
@@ -193,17 +195,21 @@ class DuplicateAsnCheckerPlugin(
         """
         Only needs to run if the metadata includes an ASN
         """
-        self.log.info(self.metadata.asn is not None)
         return self.metadata.asn is not None
 
     def run(self) -> Optional[str]:
-        # Validate the range is above zero and less than uint32_t max
-        # otherwise, Whoosh can't handle it in the index
+        """
+        Validate the ASN is a good range and doesn't already exist
+        """
         if (
             self.metadata.asn < Document.ARCHIVE_SERIAL_NUMBER_MIN
             or self.metadata.asn > Document.ARCHIVE_SERIAL_NUMBER_MAX
         ):
-            msg = f"Not consuming {self.input_doc.original_file.name}: Given ASN {self.metadata.asn} is out of range [{Document.ARCHIVE_SERIAL_NUMBER_MIN:,}, {Document.ARCHIVE_SERIAL_NUMBER_MAX:,}]"
+            msg = (
+                f"Not consuming {self.input_doc.original_file.name}: "
+                f"Given ASN {self.metadata.asn} is out of range "
+                f"[{Document.ARCHIVE_SERIAL_NUMBER_MIN:,}, {Document.ARCHIVE_SERIAL_NUMBER_MAX:,}]"
+            )
             self.log.error(msg)
             self.status_mgr.send_progress(
                 ProgressStatusOptions.FAILED,
@@ -226,30 +232,51 @@ class DuplicateAsnCheckerPlugin(
             raise StopConsumeTaskError(msg)
 
 
-class Consumer(LoggingMixin):
-    logging_name = "paperless.consumer"
+class DirectorySetupPlugin(
+    AlwaysRunPluginMixin,
+    NoSetupPluginMixin,
+    NoCleanupPluginMixin,
+    ConsumeTaskPlugin,
+):
+    def run(self) -> Optional[str]:
+        """
+        Ensure all required directories exist before attempting to use them
+        """
+        settings.SCRATCH_DIR.mkdir(exist_ok=True, parents=True)
+        settings.THUMBNAIL_DIR.mkdir(exist_ok=True, parents=True)
+        settings.ORIGINALS_DIR.mkdir(exist_ok=True, parents=True)
+        settings.ARCHIVE_DIR.mkdir(exist_ok=True, parents=True)
+
+
+class ConsumerPlugin(AlwaysRunPluginMixin, ConsumeTaskPlugin):
+    NAME: str = "ConsumerPlugin"
+
+    def setup(self) -> None:
+        pass
+
+    def run(self) -> Optional[str]:
+        pass
+
+    def cleanup(self) -> None:
+        pass
 
     def _send_progress(
         self,
         current_progress: int,
         max_progress: int,
-        status: ConsumerFilePhase,
+        status: ProgressStatusOptions,
         message: Optional[ConsumerStatusShortMessage] = None,
         document_id=None,
-    ):  # pragma: no cover
-        payload = {
-            "filename": os.path.basename(self.filename) if self.filename else None,
-            "task_id": self.task_id,
-            "current_progress": current_progress,
-            "max_progress": max_progress,
-            "status": status,
-            "message": message,
-            "document_id": document_id,
-            "owner_id": self.override_owner_id if self.override_owner_id else None,
-        }
-        async_to_sync(self.channel_layer.group_send)(
-            "status_updates",
-            {"type": "status_update", "data": payload},
+    ):
+        self.status_mgr.send_progress(
+            status,
+            str(message),
+            current_progress,
+            max_progress,
+            {
+                "document_id": document_id,
+                "owner_id": self.override_owner_id if self.override_owner_id else None,
+            },
         )
 
     def _fail(
@@ -259,88 +286,9 @@ class Consumer(LoggingMixin):
         exc_info=None,
         exception: Optional[Exception] = None,
     ):
-        self._send_progress(100, 100, ConsumerFilePhase.FAILED, message)
+        self._send_progress(100, 100, ProgressStatusOptions.FAILED, message)
         self.log.error(log_message or message, exc_info=exc_info)
         raise ConsumerError(f"{self.filename}: {log_message or message}") from exception
-
-    def __init__(self):
-        super().__init__()
-        self.path: Optional[Path] = None
-        self.original_path: Optional[Path] = None
-        self.filename = None
-        self.override_title = None
-        self.override_correspondent_id = None
-        self.override_tag_ids = None
-        self.override_document_type_id = None
-        self.override_asn = None
-        self.task_id = None
-        self.override_owner_id = None
-        self.override_custom_field_ids = None
-
-        self.channel_layer = get_channel_layer()
-
-    def pre_check_file_exists(self):
-        """
-        Confirm the input file still exists where it should
-        """
-        if not os.path.isfile(self.original_path):
-            self._fail(
-                ConsumerStatusShortMessage.FILE_NOT_FOUND,
-                f"Cannot consume {self.original_path}: File not found.",
-            )
-
-    def pre_check_duplicate(self):
-        """
-        Using the MD5 of the file, check this exact file doesn't already exist
-        """
-        with open(self.original_path, "rb") as f:
-            checksum = hashlib.md5(f.read()).hexdigest()
-        existing_doc = Document.objects.filter(
-            Q(checksum=checksum) | Q(archive_checksum=checksum),
-        )
-        if existing_doc.exists():
-            if settings.CONSUMER_DELETE_DUPLICATES:
-                os.unlink(self.original_path)
-            self._fail(
-                ConsumerStatusShortMessage.DOCUMENT_ALREADY_EXISTS,
-                f"Not consuming {self.filename}: It is a duplicate of"
-                f" {existing_doc.get().title} (#{existing_doc.get().pk})",
-            )
-
-    def pre_check_directories(self):
-        """
-        Ensure all required directories exist before attempting to use them
-        """
-        os.makedirs(settings.SCRATCH_DIR, exist_ok=True)
-        os.makedirs(settings.THUMBNAIL_DIR, exist_ok=True)
-        os.makedirs(settings.ORIGINALS_DIR, exist_ok=True)
-        os.makedirs(settings.ARCHIVE_DIR, exist_ok=True)
-
-    def pre_check_asn_value(self):
-        """
-        Check that if override_asn is given, it is unique and within a valid range
-        """
-        if not self.override_asn:
-            # check not necessary in case no ASN gets set
-            return
-        # Validate the range is above zero and less than uint32_t max
-        # otherwise, Whoosh can't handle it in the index
-        if (
-            self.override_asn < Document.ARCHIVE_SERIAL_NUMBER_MIN
-            or self.override_asn > Document.ARCHIVE_SERIAL_NUMBER_MAX
-        ):
-            self._fail(
-                ConsumerStatusShortMessage.ASN_RANGE,
-                f"Not consuming {self.filename}: "
-                f"Given ASN {self.override_asn} is out of range "
-                f"[{Document.ARCHIVE_SERIAL_NUMBER_MIN:,}, "
-                f"{Document.ARCHIVE_SERIAL_NUMBER_MAX:,}]",
-            )
-        if Document.objects.filter(archive_serial_number=self.override_asn).exists():
-            self._fail(
-                ConsumerStatusShortMessage.ASN_ALREADY_EXISTS,
-                f"Not consuming {self.filename}: Given ASN already exists!",
-            )
 
     def run_pre_consume_script(self):
         """
@@ -470,43 +418,26 @@ class Consumer(LoggingMixin):
 
     def try_consume_file(
         self,
-        path: Path,
-        override_filename=None,
-        override_title=None,
-        override_correspondent_id=None,
-        override_document_type_id=None,
-        override_tag_ids=None,
-        override_storage_path_id=None,
-        task_id=None,
-        override_created=None,
-        override_asn=None,
-        override_owner_id=None,
-        override_view_users=None,
-        override_view_groups=None,
-        override_change_users=None,
-        override_change_groups=None,
-        override_custom_field_ids=None,
     ) -> Document:
         """
         Return the document object if it was successfully created.
         """
 
-        self.original_path = Path(path).resolve()
-        self.filename = override_filename or self.original_path.name
-        self.override_title = override_title
-        self.override_correspondent_id = override_correspondent_id
-        self.override_document_type_id = override_document_type_id
-        self.override_tag_ids = override_tag_ids
-        self.override_storage_path_id = override_storage_path_id
-        self.task_id = task_id or str(uuid.uuid4())
-        self.override_created = override_created
-        self.override_asn = override_asn
-        self.override_owner_id = override_owner_id
-        self.override_view_users = override_view_users
-        self.override_view_groups = override_view_groups
-        self.override_change_users = override_change_users
-        self.override_change_groups = override_change_groups
-        self.override_custom_field_ids = override_custom_field_ids
+        self.original_path = self.input_doc.original_file
+        self.filename = self.metadata.filename or self.original_path.name
+        self.override_title = self.metadata.title
+        self.override_correspondent_id = self.metadata.correspondent_id
+        self.override_document_type_id = self.metadata.document_type_id
+        self.override_tag_ids = self.metadata.tag_ids
+        self.override_storage_path_id = self.metadata.storage_path_id
+        self.override_created = self.metadata.created
+        self.override_asn = self.metadata.asn
+        self.override_owner_id = self.metadata.owner_id
+        self.override_view_users = self.metadata.view_users
+        self.override_view_groups = self.metadata.view_groups
+        self.override_change_users = self.metadata.change_users
+        self.override_change_groups = self.metadata.change_groups
+        self.override_custom_field_ids = self.metadata.custom_field_ids
 
         self._send_progress(
             0,
@@ -515,26 +446,19 @@ class Consumer(LoggingMixin):
             ConsumerStatusShortMessage.NEW_FILE,
         )
 
-        # Make sure that preconditions for consuming the file are met.
-
-        self.pre_check_file_exists()
-        self.pre_check_directories()
-        self.pre_check_duplicate()
-        self.pre_check_asn_value()
-
         self.log.info(f"Consuming {self.filename}")
 
         # For the actual work, copy the file into a tempdir
         tempdir = tempfile.TemporaryDirectory(
-            prefix="paperless-ngx",
-            dir=settings.SCRATCH_DIR,
+            prefix="consumer",
+            dir=self.base_tmp_dir,
         )
         self.working_copy = Path(tempdir.name) / Path(self.filename)
         copy_file_with_basic_stats(self.original_path, self.working_copy)
 
         # Determine the parser class.
 
-        mime_type = magic.from_file(self.working_copy, mime=True)
+        mime_type = self.input_doc.mime_type
 
         self.log.debug(f"Detected mime type: {mime_type}")
 
