@@ -57,6 +57,10 @@ ARG JBIG2ENC_VERSION=0.29
 ARG QPDF_VERSION=11.6.4
 ARG GS_VERSION=10.02.1
 
+# Set Python environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+
 #
 # Begin installation and configuration
 # Order the steps below from least often changed to most
