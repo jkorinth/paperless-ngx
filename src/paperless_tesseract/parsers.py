@@ -1,3 +1,4 @@
+import datetime
 import os
 import re
 import subprocess
@@ -328,6 +329,32 @@ class RasterisedDocumentParser(DocumentParser):
             self.log.debug("Document has text, skipping OCRmyPDF entirely.")
             self.text = text_original
             return
+
+        # If CONSUMER_FILENAME_METADATA_REGEX is set, try to extract metadata
+        # from the original filename
+        if r := settings.CONSUMER_FILENAME_METADATA_REGEX:
+            self.log.info("CONSUMER_FILENAME_METADATA_REGEX is set, extracting metadata from filename")
+            if m := r.match(document_path.name):
+                self.log.debug(f"matched groups: {m.groups()}")
+                dategrp = {'year', 'month', 'day'}
+                found = set(m.groupdict().keys())
+                datem = dategrp.intersection(found)
+                if datem:
+                    if datem == dategrp:
+                        datestr = f"{m['year']}-{m['month']}-{m['day']}"
+                        self.log.debug(f"found date in filename: {datestr}")
+                        self.date = datetime.datetime(year=int(m["year"]),
+                                                  month=int(m["month"]),
+                                                  day=int(m["day"]),
+                                                    tzinfo=datetime.timezone.utc)
+                    else:
+                        self.log.warning(f"found {datem} groups in regex, but all of {dategrp} are required to parse creation date")
+                if "correspondent" in found:
+                    self.log.debug(f"found correspondent in filename: {m['correspondent']}")
+                    self.correspondent = m["correspondent"]
+            else:
+                self.log.warning(f"document_path does not match regex: {document_path.name} ({r})")
+
 
         # Either no text was in the original or there should be an archive
         # file created, so OCR the file and create an archive with any
