@@ -112,6 +112,17 @@ def __get_list(
         return []
 
 
+def __get_optional_re(
+    key: str,
+    default: Optional[re.Pattern] = None
+) -> Optional[re.Pattern]:
+    """
+    Return a compiled regex from the environment, if it exists.
+    """
+    if key in os.environ:
+        return re.compile(os.environ[key])
+
+
 def _parse_redis_url(env_redis: Optional[str]) -> tuple[str]:
     """
     Gets the Redis information from the environment or a default and handles
@@ -844,6 +855,10 @@ CONSUMER_COLLATE_DOUBLE_SIDED_SUBDIR_NAME: Final[str] = os.getenv(
 
 CONSUMER_COLLATE_DOUBLE_SIDED_TIFF_SUPPORT: Final[bool] = __get_boolean(
     "PAPERLESS_CONSUMER_COLLATE_DOUBLE_SIDED_TIFF_SUPPORT",
+)
+
+CONSUMER_FILENAME_METADATA_REGEX: Final[Optional[re.Pattern]] = __get_optional_re(
+    "PAPERLESS_CONSUMER_FILENAME_METADATA_REGEX",
 )
 
 OCR_PAGES = __get_optional_int("PAPERLESS_OCR_PAGES")
