@@ -539,6 +539,7 @@ class Consumer(LoggingMixin):
                 )
                 date = parse_date(self.filename, text)
             archive_path = document_parser.get_archive_path()
+            correspondent = document_parser.get_correspondent_name()
 
         except ParseError as e:
             self._fail(
@@ -622,6 +623,17 @@ class Consumer(LoggingMixin):
                             document.archive_checksum = hashlib.md5(
                                 f.read(),
                             ).hexdigest()
+
+                if correspondent:
+                    c = Correspondent.objects.filter(name=correspondent)
+                    if c:
+                        self.log.debug(f"found correspondents: {c}")
+                        document.correspondent = c.get()
+                    else:
+                        self.log.debug(f"correspondent {correspondent} not found!")
+                        c = Correspondent(name=correspondent)
+                        c.save()
+                        document.correspondent = c
 
                 # Don't save with the lock active. Saving will cause the file
                 # renaming logic to acquire the lock as well.
