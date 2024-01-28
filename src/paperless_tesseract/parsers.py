@@ -1,3 +1,4 @@
+import datetime
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from PIL import Image
 from documents.parsers import DocumentParser
 from documents.parsers import ParseError
 from documents.parsers import make_thumbnail_from_pdf
+from paperless import settings as psettings
 
 
 class NoTextFoundException(Exception):
@@ -43,8 +45,7 @@ class RasterisedDocumentParser(DocumentParser):
                 if isinstance(value, list):
                     value = " ".join([str(e) for e in value])
                 value = str(value)
-                try:
-                    m = namespace_pattern.match(key)
+                if m := namespace_pattern.match(key):
                     result.append(
                         {
                             "namespace": m.group(1),
@@ -52,10 +53,6 @@ class RasterisedDocumentParser(DocumentParser):
                             "key": m.group(2),
                             "value": value,
                         },
-                    )
-                except Exception as e:
-                    self.log.warning(
-                        f"Error while reading metadata {key}: {value}. Error: {e}",
                     )
         return result
 
@@ -66,6 +63,17 @@ class RasterisedDocumentParser(DocumentParser):
             self.logging_group,
         )
 
+    def _get_date(self, filename: str) -> datetime.datetime | None:
+        import pikepdf
+        pdf = pikepdf.open(filename)
+        meta = pdf.open_metadata()
+        date_pattern = re.compile(r'(?P<year>[12]\d\d\d)-(?P<month>(0\d)|(1[012]))-(?P<day>(?<=(01|03|05|07|08|10|12)-)(([012]\d)|(3[012]))|(?<=02-)(([012]\d))|(([012]\d)|(30)))')
+        self.log.info("meta = {meta}")
+        self.log.info("meta = {meta}")
+        if d := meta.get('xmp:CreationDate'):
+            if m := date_pattern.match(d):
+                return datetime.date(year=m.group('year'), month=m.group('month'), day=m.group('day'))
+
     def is_image(self, mime_type):
         return mime_type in [
             "image/png",
@@ -75,6 +83,22 @@ class RasterisedDocumentParser(DocumentParser):
             "image/gif",
             "image/webp",
         ]
+
+    def get_correspondent(self, filename: str) -> str | None:
+        import pikepdf
+
+        self.log.debug(f'CONSUMER_CREATE_CORRESPONDENTS_FROM_PDF_METADATA = {psettings.CONSUMER_CREATE_CORRESPONDENTS_FROM_PDF_METADATA}')
+        self.log.debug(f'CONSUMER_PDF_METADATA_CORRESPONDENT_TAG = {psettings.CONSUMER_PDF_METADATA_CORRESPONDENT_TAG}')
+
+        pdf = pikepdf.open(filename)
+        meta = pdf.open_metadata()
+        if psettings.CONSUMER_CREATE_CORRESPONDENTS_FROM_PDF_METADATA:
+            tag = psettings.CONSUMER_PDF_METADATA_CORRESPONDENT_TAG
+            if tag and tag in meta:
+                self.log.info(f'found correspondent: {meta[tag]}')
+                return meta[tag]
+            else:
+                self.log.warning(f'could not find {tag} in metadata:\n{meta}')
 
     def has_alpha(self, image):
         with Image.open(image) as im:
@@ -332,7 +356,11 @@ class RasterisedDocumentParser(DocumentParser):
             if settings.OCR_SKIP_ARCHIVE_FILE != "always":
                 self.archive_path = archive_path
 
+            self.log.debug(f"sidecar_file = {sidecar_file}, archive_path = {archive_path}")
+
             self.text = self.extract_text(sidecar_file, archive_path)
+            self.date = self._get_date(document_path)
+            self.correspondent = self.get_correspondent(document_path)
 
             if not self.text:
                 raise NoTextFoundException("No text was found in the original document")

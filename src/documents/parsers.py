@@ -325,6 +325,7 @@ class DocumentParser(LoggingMixin):
         self.text = None
         self.date: Optional[datetime.datetime] = None
         self.progress_callback = progress_callback
+        self.correspondent: Optional[str] = None
 
     def progress(self, current_progress, max_progress):
         if self.progress_callback:
@@ -362,6 +363,9 @@ class DocumentParser(LoggingMixin):
 
     def get_date(self) -> Optional[datetime.datetime]:
         return self.date
+
+    def get_correspondent(self, filename: str) -> Optional[str]:
+        return self.correspondent
 
     def cleanup(self):
         self.log.debug(f"Deleting directory {self.tempdir}")

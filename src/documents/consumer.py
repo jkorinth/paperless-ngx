@@ -434,6 +434,7 @@ class Consumer(LoggingMixin):
         date = None
         thumbnail = None
         archive_path = None
+        correspondent = None
 
         try:
             self._send_progress(
@@ -469,6 +470,12 @@ class Consumer(LoggingMixin):
                 )
                 date = parse_date(self.filename, text)
             archive_path = document_parser.get_archive_path()
+            correspondent = document_parser.get_correspondent(document_parser.get_archive_path())
+            if correspondent:
+                self.log.info(f"document has reported correspondent: '{correspondent}'")
+                correspondent = Correspondent.objects.get_or_create(name=correspondent)[0]
+                self.log.info(f"found correspondent: {correspondent}")
+
 
         except ParseError as e:
             self._fail(
@@ -506,7 +513,10 @@ class Consumer(LoggingMixin):
         try:
             with transaction.atomic():
                 # store the document.
-                document = self._store(text=text, date=date, mime_type=mime_type)
+                document = self._store(text=text, date=date,
+                                       mime_type=mime_type)
+                document.correspondent = correspondent
+                document.save()
 
                 # If we get here, it was successful. Proceed with post-consume
                 # hooks. If they fail, nothing will get changed.
