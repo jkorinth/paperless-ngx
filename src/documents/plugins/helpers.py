@@ -55,7 +55,7 @@ class ProgressManager:
         message: str,
         current_progress: int,
         max_progress: int,
-        extra_args: Optional[dict[str, Union[str, int]]] = None,
+        extra_args: Optional[dict[str, Optional[Union[str, int]]]] = None,
     ) -> None:
         # Ensure the layer is open
         self.open()
